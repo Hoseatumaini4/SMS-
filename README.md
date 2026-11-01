@@ -1,58 +1,53 @@
-# ussd-ai-response
+# SMS ↔ Gemini gateway (Africa's Talking)
 
-USSD service for checking crop prices across Tanzanian regions/markets.
-Africa's Talking handles the USSD session; Gemini or OpenAI understands free-text questions.
+Text a number → Africa's Talking calls your webhook → Gemini answers → reply comes back by SMS.
+(ChatGPT/OpenAI is optional: add `OPENAI_API_KEY` and users can text `GPT`. Without it, Gemini only.)
 
-## Run
+```
+Phone ──SMS──> Africa's Talking ──POST /sms/incoming?token=…──> this app ──> Gemini
+Phone <──SMS── Africa's Talking <──────────── send reply ──────────────┘
+```
 
+## 1. Keys you need
+| What | Where |
+|---|---|
+| Africa's Talking API key + username | account.africastalking.com → Settings → API Key (sandbox app uses username `sandbox`) |
+| Gemini API key | aistudio.google.com → Get API key |
+
+## 2. Run locally (no cost, no SMS sent)
 ```bash
-npm install
-cp .env.example .env      # add GEMINI_API_KEY or OPENAI_API_KEY, set AI_PROVIDER
-npm run dev
-npm run sim -- "2*1*1*1"  # simulate a dial path without Africa's Talking
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # fill GEMINI_API_KEY, WEBHOOK_TOKEN; set DRY_RUN=1
+pytest                      # 14 tests should pass
+gunicorn wsgi:app -b 127.0.0.1:8000
+# other terminal:
+python scripts/simulate.py "Malaria ni nini?"    # reply is printed in the server log
 ```
 
-## Connect Africa's Talking
+## 3. Receive real SMS
+1. Receiving needs a **shortcode or long number** on your Africa's Talking account (Sandbox: SMS → Shortcodes; Live: request one for Tanzania — it is not free and takes approval time). Menu names may differ slightly.
+2. Put the app online over HTTPS (Render, Railway, Fly.io, a VPS, or Docker). Use **one always-on server**, not serverless: replies are sent from a background thread. For a quick test: `ngrok http 8000`.
+3. In Africa's Talking: SMS → SMS Callback URLs → **Incoming Messages** →
+   `https://YOUR-HOST/sms/incoming?token=YOUR_WEBHOOK_TOKEN`
+4. Sandbox: use the simulator (Launch Simulator) to send an SMS to your shortcode. For live: set `AT_SANDBOX=false`, `AT_USERNAME=<your app username>`, live `AT_API_KEY`, and have SMS balance.
 
-1. Create a USSD service code in the Africa's Talking dashboard (sandbox first).
-2. Expose your server publicly (ngrok, or deploy) and set the callback URL to `https://<host>/ussd`.
-3. Test with the AT simulator before going live on real networks.
+Africa's Talking does not sign callbacks, so the secret `token` in the URL is your only guard. Keep it long and private.
 
-## Flow
+## 4. User commands (by SMS)
+`HELP`/`MSAADA` · `RESET`/`FUTA` (clear memory) · `GPT` · `GEMINI`
 
-```
-(dial) -> language -> 1. Check prices -> crop -> region -> prices
-                      2. Ask AI       -> type a question -> prices / short answer
-```
+## 5. Protect your money
+Every reply is a billed SMS. Built in: `ALLOWED_NUMBERS` (silent for others), `DAILY_LIMIT_PER_NUMBER` (default 20, one notice then quiet), replies capped at 459 chars (3 segments), emoji/markdown stripped so messages stay 160-char GSM-7 segments, duplicate callbacks ignored. **Set `ALLOWED_NUMBERS` to your own number while testing.**
 
-- Stateless: AT sends the whole path in `text` ("2*1*1*3"), so no session store is needed.
-- Replies are capped at 182 chars (`src/utils/ussd.js`).
-- AI only identifies crop + region (or answers general questions briefly). **Prices come only from providers**, never from the model.
-- If AI is off, slow (`AI_TIMEOUT_MS`) or errors, keyword matching takes over.
+## 6. Settings (`.env`)
+See `.env.example`. Key ones: `GEMINI_MODEL` (verify the name is current in AI Studio; change it if Google retires it), `SYSTEM_PROMPT` (override tone/language), `HISTORY_MESSAGES`/`HISTORY_TTL_MINUTES` (conversation memory), `DB_PATH` (SQLite; mount a volume in Docker/Render so memory survives restarts).
 
-## Add a price API
+## 7. Deploy
+- **Render/Railway**: new web service from this folder, start command from `Procfile`, add env vars in the dashboard.
+- **Docker**: `docker build -t sms-ai . && docker run -p 8000:8000 -v sms-data:/data --env-file .env sms-ai`
+- Check `https://YOUR-HOST/health`.
+Keep `--workers 1` (the in-memory executor and SQLite are per process).
 
-See `src/apis/README.md`. Copy `src/apis/_template.js`, register it in `src/apis/index.js`, add its id to `PRICE_PROVIDERS`.
-
-## Structure
-
-```
-src/
-  index.js              Express server
-  config.js             env settings
-  routes/ussd.js        POST /ussd (Africa's Talking callback)
-  services/
-    menu.js             USSD menu flow
-    aiService.js        Gemini / OpenAI + keyword fallback
-    priceService.js     calls providers in parallel, caches, sorts
-    i18n.js             Swahili / English strings
-  apis/                 <- add price APIs here
-  data/                 crops.js, regions.js
-  utils/                ussd.js, picker.js, timeout.js
-scripts/simulate.js
-```
-
-## Notes
-
-- The bundled `mock` provider returns **demo data**, labelled "(demo)" in replies. Replace it with real sources before launch.
-- Free-text input over USSD can behave differently per network; test on each one you target.
+## Files
+`gateway/` app code · `tests/` · `scripts/simulate.py` · `wsgi.py` · `Procfile` · `Dockerfile`
